@@ -1,0 +1,131 @@
+#include <iostream>
+#include <Windows.h>
+#include <winternl.h>
+#define ADDR unsigned __int64
+
+
+using cfA = HANDLE(NTAPI*)(
+	LPCSTR                lpFileName,
+	DWORD                 dwDesiredAccess,
+	DWORD                 dwShareMode,
+	LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+	DWORD                 dwCreationDisposition,
+	DWORD                 dwFlagsAndAttributes,
+	HANDLE                hTemplateFile
+	);
+
+PDWORD getFunctionAddressByHash( DWORD hash);
+HMODULE find_dll_base(const char* dll_name);
+DWORD getHashFromString(char* string);
+HRESULT UnicodeToAnsi(LPCOLESTR pszW, LPSTR* ppszA);
+
+int main()
+{
+
+	PDWORD functionAddress = getFunctionAddressByHash( 0x005026961);
+	cfA PCFA = (cfA)functionAddress;
+	HANDLE hIn;
+	hIn = PCFA("D:\\tcccAbA.txt", GENERIC_READ, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	return 1;
+}
+
+
+
+DWORD getHashFromString(char* string)
+{
+	size_t stringLength = strnlen_s(string, 50);
+	DWORD hash = 0x35;
+
+	for (size_t i = 0; i < stringLength; i++)
+	{
+		hash += (hash * 0xab10f29f + string[i]) & 0xffffff;
+	}
+	// printf("%s: 0x00%x\n", string, hash);
+
+	return hash;
+}
+
+HMODULE find_dll_base(const char* dll_name) {
+
+	PTEB teb = reinterpret_cast<PTEB>(__readgsqword(reinterpret_cast<DWORD_PTR>(&static_cast<NT_TIB*>(nullptr)->Self)));
+	PPEB_LDR_DATA loader = teb->ProcessEnvironmentBlock->Ldr;
+
+	PLIST_ENTRY head = &loader->InMemoryOrderModuleList;
+	PLIST_ENTRY curr = head->Flink;
+
+	
+	do {
+		PLDR_DATA_TABLE_ENTRY dllEntry = CONTAINING_RECORD(curr, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks);
+		char* dllName;
+		
+		UnicodeToAnsi(dllEntry->FullDllName.Buffer, &dllName);
+		char* result = strstr(dllName, dll_name);
+		CoTaskMemFree(dllName); 
+
+		if (result != NULL) {
+			return (HMODULE)dllEntry->DllBase;
+		}
+		curr = curr->Flink;
+	} while (curr != head);
+
+	return NULL;
+}
+
+
+HRESULT UnicodeToAnsi(LPCOLESTR pszW, LPSTR* ppszA) {
+	ULONG cbAnsi, cCharacters;
+	DWORD dwError;   
+	if (pszW == NULL)
+	{
+		*ppszA = NULL;
+		return NOERROR;
+	}
+	cCharacters = wcslen(pszW) + 1;
+	cbAnsi = cCharacters * 2;
+
+	*ppszA = (LPSTR)CoTaskMemAlloc(cbAnsi);
+	if (NULL == *ppszA)
+		return E_OUTOFMEMORY;
+
+	if (0 == WideCharToMultiByte(CP_ACP, 0, pszW, cCharacters, *ppszA, cbAnsi, NULL, NULL))
+	{
+		dwError = GetLastError();
+		CoTaskMemFree(*ppszA);
+		*ppszA = NULL;
+		return HRESULT_FROM_WIN32(dwError);
+	}
+	return NOERROR;
+}
+
+
+
+PDWORD getFunctionAddressByHash( DWORD hash)
+{
+	PDWORD functionAddress = (PDWORD)0;
+	HMODULE libraryBase = find_dll_base("KERNEL32.DLL");
+
+
+	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)libraryBase;
+	PIMAGE_NT_HEADERS NTHeaders = (PIMAGE_NT_HEADERS)((DWORD_PTR)libraryBase + dosHeader->e_lfanew);
+	DWORD_PTR exportDirectoryRVA = NTHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+
+	PIMAGE_EXPORT_DIRECTORY ExportDirectory = (PIMAGE_EXPORT_DIRECTORY)((DWORD_PTR)libraryBase + exportDirectoryRVA);
+	PDWORD addresOfFunctionsRVA = (PDWORD)((DWORD_PTR)libraryBase + ExportDirectory->AddressOfFunctions);
+	PDWORD addressOfNamesRVA = (PDWORD)((DWORD_PTR)libraryBase + ExportDirectory->AddressOfNames);
+	PWORD addressOfNameOrdinalsRVA = (PWORD)((DWORD_PTR)libraryBase + ExportDirectory->AddressOfNameOrdinals);
+	for (DWORD i = 0; i < ExportDirectory->NumberOfFunctions; i++)
+	{
+		DWORD functionNameRVA = addressOfNamesRVA[i];
+		DWORD_PTR functionNameVA = (DWORD_PTR)libraryBase + functionNameRVA;
+		char* functionName = (char*)functionNameVA;
+		DWORD_PTR functionAddressRVA = 0;
+		DWORD functionNameHash = getHashFromString(functionName);
+		if (functionNameHash == hash)
+		{
+			functionAddressRVA = addresOfFunctionsRVA[addressOfNameOrdinalsRVA[i]];
+			functionAddress = (PDWORD)((DWORD_PTR)libraryBase + functionAddressRVA);
+			printf("%s : 0x%x : %p\n", functionName, functionNameHash, functionAddress);
+			return functionAddress;
+		}
+	}
+}
